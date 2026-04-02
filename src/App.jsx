@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "./supabase";
+import MapView from "./MapView";
 
 const COMMISSION = 0.15;
 const DURATIONS = [
@@ -172,24 +173,38 @@ function OwnerApp({ profile, onSignOut }) {
   const [currentWalk, setCurrentWalk]           = useState(null);
   const [walkerProfile, setWalkerProfile]       = useState(null);
   const [walks, setWalks]                       = useState([]);
+  const [walkerPos, setWalkerPos]               = useState({ lat: null, lng: null });
+  const [ownerPos, setOwnerPos]                 = useState({ lat: null, lng: null });
 
   const commission  = (customPrice * COMMISSION).toFixed(2);
   const walkerEarns = (customPrice * (1 - COMMISSION)).toFixed(2);
 
+  // Obtener ubicación del dueño al cargar
+  useEffect(() => {
+    navigator.geolocation?.getCurrentPosition(pos => {
+      setOwnerPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+    });
+  }, []);
+
   useEffect(() => { if (screen === "history") loadWalks(); }, [screen]);
 
-  // Escuchar cuando el paseador inicia el paseo (status -> active)
+  // Escuchar ubicación del paseador en tiempo real
   useEffect(() => {
     if (!currentWalk?.id) return;
-    const ch = supabase.channel(`walk-active-${currentWalk.id}`)
+    const ch = supabase.channel(`walk-pos-${currentWalk.id}`)
       .on("postgres_changes", { event:"UPDATE", schema:"public", table:"walks", filter:`id=eq.${currentWalk.id}` },
         (payload) => {
+          if (payload.new.walker_lat) setWalkerPos({ lat: payload.new.walker_lat, lng: payload.new.walker_lng });
+          if (payload.new.status === "accepted" && payload.new.walker_id && screen === "searching") {
+            supabase.from("profiles").select("*").eq("id", payload.new.walker_id).single()
+              .then(({ data: wp }) => { setWalkerProfile(wp); setCurrentWalk(payload.new); setScreen("offer"); });
+          }
           if (payload.new.status === "active") setScreen("active");
-          if (payload.new.status === "completed") setScreen("history");
+          if (payload.new.status === "completed") { loadWalks(); setScreen("history"); }
         })
       .subscribe();
     return () => ch.unsubscribe();
-  }, [currentWalk]);
+  }, [currentWalk, screen]);
 
   async function loadWalks() {
     const { data } = await supabase
@@ -220,19 +235,6 @@ function OwnerApp({ profile, onSignOut }) {
       offered_price: customPrice, status: "pending",
     }).select().single();
     setCurrentWalk(walk);
-
-    // Escuchar cuando paseador acepta
-    const channel = supabase.channel(`walk-${walk.id}`)
-      .on("postgres_changes", { event:"UPDATE", schema:"public", table:"walks", filter:`id=eq.${walk.id}` },
-        async (payload) => {
-          if (payload.new.status === "accepted" && payload.new.walker_id) {
-            const { data: wp } = await supabase.from("profiles").select("*").eq("id", payload.new.walker_id).single();
-            setWalkerProfile(wp);
-            setCurrentWalk(payload.new);
-            setScreen("offer");
-            channel.unsubscribe();
-          }
-        }).subscribe();
   }
 
   if (screen === "home") return (
@@ -243,10 +245,10 @@ function OwnerApp({ profile, onSignOut }) {
         <button style={S.iconBtn} onClick={()=>setScreen("history")}>📋</button>
         <button style={S.iconBtn} onClick={onSignOut}>🚪</button>
       </header>
-      <div style={S.mapPlaceholder}>
-        <div style={S.mapDot} />
-        <div style={S.mapLabel}>📍 Tu ubicación</div>
-      </div>
+
+      {/* Mapa real con ubicación del dueño */}
+      <MapView ownerLat={ownerPos.lat} ownerLng={ownerPos.lng} height={220} />
+
       <div style={S.card}>
         <h2 style={S.sectionTitle}>¿A pasear? 🐶</h2>
         <label style={S.label}>Nombre del perro</label>
@@ -294,9 +296,10 @@ function OwnerApp({ profile, onSignOut }) {
         <button style={S.backBtn} onClick={()=>setScreen("home")}>←</button>
         <span style={S.headerTitle}>Paseador en camino 🎉</span>
       </header>
-      <div style={{...S.card,marginTop:24}}>
+      <MapView ownerLat={ownerPos.lat} ownerLng={ownerPos.lng} walkerLat={walkerPos.lat} walkerLng={walkerPos.lng} height={220} />
+      <div style={S.card}>
         <div style={S.walkerProfile}>
-          <span style={{fontSize:56}}>🦮</span>
+          <span style={{fontSize:48}}>🦮</span>
           <div>
             <h3 style={S.walkerName}>{walkerProfile?.name}</h3>
             <div style={S.ratingRow}><StarIcon /><span style={S.ratingText}>{walkerProfile?.rating ?? "5.0"} · {walkerProfile?.total_walks ?? 0} paseos</span></div>
@@ -304,39 +307,33 @@ function OwnerApp({ profile, onSignOut }) {
         </div>
         <div style={S.summaryBox}>
           <SummaryRow label="Perro"    value={dogName||"Mi perro"} />
-          <SummaryRow label="Tamaño"   value={dogSize} />
           <SummaryRow label="Duración" value={selectedDuration.label} />
           <SummaryRow label="Tu pago"  value={`$${customPrice}`} bold />
         </div>
-        <div style={S.infoBox}>
-          ⏳ Esperando que el paseador llegue e inicie el paseo…
-        </div>
+        <div style={S.infoBox}>⏳ Esperando que el paseador llegue e inicie el paseo…</div>
         <button style={S.outlineBtn} onClick={()=>setScreen("home")}>Cancelar</button>
       </div>
     </div></div>
   );
 
-  // El dueño ve el paseo activo pero sin controles — el paseador lo maneja
   if (screen === "active") return (
     <div style={S.page}><div style={S.appShell}>
       <header style={{...S.header,background:"#1a1a2e"}}>
         <PawIcon size={22} color="#FF6B35" />
         <span style={{...S.headerTitle,color:"#fff"}}>Paseo en curso 🐾</span>
       </header>
-      <div style={{...S.mapPlaceholder,background:"linear-gradient(135deg,#1a1a2e,#16213e)"}}>
-        <div style={{...S.mapLabel,background:"#FF6B35",color:"#fff"}}>En movimiento</div>
-      </div>
+      {/* Mapa con ubicación del paseador en tiempo real */}
+      <MapView ownerLat={ownerPos.lat} ownerLng={ownerPos.lng} walkerLat={walkerPos.lat} walkerLng={walkerPos.lng} height={280} />
       <div style={S.card}>
         <div style={S.walkerProfile}>
-          <span style={{fontSize:48}}>🦮</span>
+          <span style={{fontSize:40}}>🦮</span>
           <div>
-            <b style={{color:"#1a1a2e",fontSize:18}}>{walkerProfile?.name}</b>
-            <p style={{margin:0,color:"#888",fontSize:13}}>Está paseando a {dogName||"tu perro"}</p>
+            <b style={{color:"#1a1a2e",fontSize:16}}>{walkerProfile?.name}</b>
+            <p style={{margin:0,color:"#888",fontSize:13}}>Paseando a {dogName||"tu perro"}</p>
+            {walkerPos.lat && <p style={{margin:0,color:"#43A047",fontSize:12}}>📍 Ubicación en tiempo real activa</p>}
           </div>
         </div>
-        <div style={S.infoBox}>
-          🐾 El paseador finalizará el paseo cuando termine. Recibirás una notificación.
-        </div>
+        <div style={S.infoBox}>🐾 El paseador finalizará el paseo cuando termine.</div>
         <button style={S.outlineBtn} onClick={()=>setScreen("history")}>Ver mis paseos</button>
       </div>
     </div></div>
@@ -364,7 +361,7 @@ function OwnerApp({ profile, onSignOut }) {
               <span style={{...S.statusBadge,
                 background:w.status==="completed"?"#e8f5e9":w.status==="active"?"#fff3e0":"#f5f5f5",
                 color:w.status==="completed"?"#43A047":w.status==="active"?"#FF6B35":"#aaa"}}>
-                {w.status==="completed"?"✅ completado":w.status==="active"?"🐾 activo":w.status}
+                {w.status==="completed"?"✅ listo":w.status==="active"?"🐾 activo":w.status}
               </span>
             </div>
           </div>
@@ -376,18 +373,39 @@ function OwnerApp({ profile, onSignOut }) {
 
 // ── APP PASEADOR ───────────────────────────────────────────────────
 function WalkerApp({ profile, onSignOut }) {
-  const [walks, setWalks]         = useState([]);
-  const [myWalks, setMyWalks]     = useState([]);
-  const [tab, setTab]             = useState("available");
+  const [walks, setWalks]           = useState([]);
+  const [myWalks, setMyWalks]       = useState([]);
+  const [tab, setTab]               = useState("available");
   const [activeWalk, setActiveWalk] = useState(null);
-  const [timer, setTimer]         = useState(0);
+  const [timer, setTimer]           = useState(0);
+  const [walkerPos, setWalkerPos]   = useState({ lat: null, lng: null });
+  const geoWatchRef                 = useRef(null);
 
-  // Timer — solo corre si hay un paseo activo
+  // Timer
   useEffect(() => {
     let iv;
     if (activeWalk) iv = setInterval(() => setTimer(t => t + 1), 1000);
     else setTimer(0);
     return () => clearInterval(iv);
+  }, [activeWalk]);
+
+  // GPS — enviar ubicación a Supabase cada 5 segundos cuando hay paseo activo
+  useEffect(() => {
+    if (!activeWalk) {
+      if (geoWatchRef.current) navigator.geolocation.clearWatch(geoWatchRef.current);
+      return;
+    }
+    geoWatchRef.current = navigator.geolocation.watchPosition(async (pos) => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      setWalkerPos({ lat, lng });
+      await supabase.from("walks").update({
+        walker_lat: lat, walker_lng: lng,
+        walker_last_seen: new Date().toISOString()
+      }).eq("id", activeWalk.id);
+    }, null, { enableHighAccuracy: true, maximumAge: 5000 });
+
+    return () => { if (geoWatchRef.current) navigator.geolocation.clearWatch(geoWatchRef.current); };
   }, [activeWalk]);
 
   useEffect(() => {
@@ -408,10 +426,8 @@ function WalkerApp({ profile, onSignOut }) {
   async function loadMyWalks() {
     const { data } = await supabase.from("walks")
       .select("*, dog:dogs(name), owner:profiles!walks_owner_id_fkey(name)")
-      .eq("walker_id",profile.id)
-      .order("created_at",{ascending:false});
+      .eq("walker_id",profile.id).order("created_at",{ascending:false});
     setMyWalks(data||[]);
-    // Si hay un paseo activo, setearlo
     const active = data?.find(w => w.status === "active");
     if (active) setActiveWalk(active);
   }
@@ -420,24 +436,32 @@ function WalkerApp({ profile, onSignOut }) {
     const { error } = await supabase.from("walks")
       .update({walker_id:profile.id,status:"accepted"})
       .eq("id",walk.id).eq("status","pending");
-    if (error) return alert("Este paseo ya fue tomado por otro paseador");
+    if (error) return alert("Este paseo ya fue tomado");
     loadAvailable(); loadMyWalks(); setTab("mine");
   }
 
   async function startWalk(walk) {
-    const { data, error } = await supabase.from("walks")
-      .update({ status:"active", started_at: new Date().toISOString() })
-      .eq("id", walk.id).select().single();
-    if (error) return alert("Error al iniciar el paseo");
-    setActiveWalk(data);
-    loadMyWalks();
+    // Pedir permiso de GPS al iniciar
+    navigator.geolocation?.getCurrentPosition(async (pos) => {
+      setWalkerPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      const { data } = await supabase.from("walks")
+        .update({ status:"active", started_at: new Date().toISOString(),
+          walker_lat: pos.coords.latitude, walker_lng: pos.coords.longitude })
+        .eq("id", walk.id).select().single();
+      setActiveWalk(data);
+      loadMyWalks();
+    }, () => {
+      // Si no hay GPS igual inicia
+      supabase.from("walks").update({ status:"active", started_at: new Date().toISOString() })
+        .eq("id", walk.id).select().single()
+        .then(({ data }) => { setActiveWalk(data); loadMyWalks(); });
+    });
   }
 
   async function finishWalk(walkId) {
     await supabase.rpc("complete_walk", { walk_id: walkId });
     setActiveWalk(null);
-    loadMyWalks();
-    setTab("mine");
+    loadMyWalks(); setTab("mine");
   }
 
   const fmt = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
@@ -453,16 +477,22 @@ function WalkerApp({ profile, onSignOut }) {
         <button style={S.iconBtn} onClick={onSignOut}>🚪</button>
       </header>
 
-      {/* Paseo activo — siempre visible arriba si hay uno */}
+      {/* Banner paseo activo con mapa */}
       {activeWalk && (
         <div style={S.activeWalkBanner}>
           <div style={S.activeWalkTop}>
             <span style={{fontSize:28}}>🐕</span>
             <div style={{flex:1}}>
               <b style={{color:"#fff"}}>Paseando a {activeWalk.dog?.name||"perro"}</b>
-              <p style={{margin:0,color:"rgba(255,255,255,.7)",fontSize:12}}>Dueño: {activeWalk.owner?.name}</p>
+              <p style={{margin:0,color:"rgba(255,255,255,.7)",fontSize:12}}>
+                {walkerPos.lat ? "📍 GPS activo" : "⏳ Obteniendo GPS..."}
+              </p>
             </div>
             <div style={S.timerBadge}>{fmt(timer)}</div>
+          </div>
+          {/* Mapa del paseador */}
+          <div style={{borderRadius:12,overflow:"hidden",marginTop:12}}>
+            <MapView walkerLat={walkerPos.lat} walkerLng={walkerPos.lng} height={180} />
           </div>
           <button style={{...S.ctaBtn,background:"#e53935",marginTop:10}}
             onClick={()=>finishWalk(activeWalk.id)}>
@@ -501,7 +531,6 @@ function WalkerApp({ profile, onSignOut }) {
             </div>
           ))
         )}
-
         {tab==="mine" && (myWalks.length===0
           ? <p style={{textAlign:"center",color:"#aaa",padding:32}}>Aún no has tomado paseos</p>
           : myWalks.map(w=>(
@@ -521,7 +550,6 @@ function WalkerApp({ profile, onSignOut }) {
                   {w.status==="completed"?"✅ listo":w.status==="active"?"🐾 activo":w.status==="accepted"?"📍 aceptado":w.status}
                 </span>
               </div>
-              {/* Botón iniciar — solo si fue aceptado y no hay otro activo */}
               {w.status === "accepted" && !activeWalk && (
                 <button style={{...S.ctaBtn,background:"#43A047",marginTop:10}} onClick={()=>startWalk(w)}>
                   ▶️ Iniciar paseo
@@ -587,7 +615,6 @@ function AdminApp({ profile, onSignOut }) {
   );
 }
 
-// ── Componentes pequeños ───────────────────────────────────────────
 function SummaryRow({ label, value, bold }) {
   return (
     <div style={S.summaryRow}>
@@ -606,7 +633,6 @@ function StatCard({ icon, label, value, color }) {
   );
 }
 
-// ── Estilos ────────────────────────────────────────────────────────
 const S = {
   page:            { minHeight:"100vh", background:"#f5f0eb", fontFamily:"'Nunito','Helvetica Neue',sans-serif", display:"flex", justifyContent:"center" },
   appShell:        { width:"100%", maxWidth:420, display:"flex", flexDirection:"column", minHeight:"100vh", background:"#fff" },
@@ -630,9 +656,6 @@ const S = {
   roleEmoji:       { fontSize:32 },
   roleTitle:       { fontWeight:800, color:"#1a1a2e", fontSize:16, display:"block" },
   roleDesc:        { fontSize:12, color:"#888", display:"block", marginTop:2 },
-  mapPlaceholder:  { height:180, background:"#e8f4e8", position:"relative", overflow:"hidden", display:"flex", alignItems:"flex-end", justifyContent:"center" },
-  mapDot:          { position:"absolute", top:"50%", left:"50%", width:16, height:16, background:"#FF6B35", borderRadius:"50%", transform:"translate(-50%,-50%)", boxShadow:"0 0 0 6px rgba(255,107,53,.3)" },
-  mapLabel:        { background:"rgba(255,255,255,.9)", padding:"4px 12px", borderRadius:20, marginBottom:12, fontSize:12, fontWeight:700, color:"#444" },
   card:            { background:"#fff", padding:"20px 16px 24px", flex:1 },
   sectionTitle:    { fontWeight:800, fontSize:18, color:"#1a1a2e", margin:"0 0 14px" },
   label:           { display:"block", fontWeight:700, fontSize:13, color:"#444", margin:"12px 0 6px" },
@@ -660,9 +683,9 @@ const S = {
   summaryLabel:    { color:"#888", fontSize:14 },
   summaryValue:    { color:"#333", fontSize:14, fontWeight:600 },
   summaryValueBold:{ color:"#FF6B35", fontSize:16, fontWeight:800 },
-  activeWalkBanner:{ background:"linear-gradient(135deg,#1a1a2e,#16213e)", padding:"16px", margin:"0" },
+  activeWalkBanner:{ background:"linear-gradient(135deg,#1a1a2e,#16213e)", padding:"16px" },
   activeWalkTop:   { display:"flex", alignItems:"center", gap:12 },
-  timerBadge:      { background:"#FF6B35", color:"#fff", borderRadius:12, padding:"6px 14px", fontWeight:900, fontSize:20, fontVariantNumeric:"tabular-nums" },
+  timerBadge:      { background:"#FF6B35", color:"#fff", borderRadius:12, padding:"6px 14px", fontWeight:900, fontSize:20 },
   tabRow:          { display:"flex", borderBottom:"2px solid #f0ebe6" },
   tab:             { flex:1, padding:"12px", background:"none", border:"none", fontWeight:700, fontSize:14, color:"#aaa", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:6 },
   tabActive:       { color:"#FF6B35", borderBottom:"2px solid #FF6B35" },
