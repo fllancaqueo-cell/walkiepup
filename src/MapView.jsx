@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
-mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN;
+mapboxgl.accessToken = 'pk.eyJ1Ijoid2Fsa2llcHVwIiwiYSI6ImNtbmkybWRlZTA5NTQycnEyNHViNzBuc3cifQ.HtTETUJPiK4olkWSGbIHbg';
 
 export default function MapView({ walkerLat, walkerLng, ownerLat, ownerLng, height = 220 }) {
   const mapContainer = useRef(null);
